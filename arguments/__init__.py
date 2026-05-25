@@ -53,6 +53,9 @@ class ModelParams(ParamGroup):
         self._depths = ""
         self._resolution = -1
         self._white_background = False
+        self.mask_rgb = False
+        self.mask_instance_idx = -1
+        self.mask_source = "auto"
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False

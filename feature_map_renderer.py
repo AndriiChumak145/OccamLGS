@@ -22,10 +22,22 @@ from arguments import ModelParams, PipelineParams, OptimizationParams, get_combi
 from gaussian_renderer import GaussianModel
 import numpy as np
 from sklearn.decomposition import PCA
-import torch.utils.dlpack
-import matplotlib.pyplot as plt
+
+
+def _filter_views_with_language_features(views, language_feature_dir, max_feature_views=None):
+    if max_feature_views is not None and max_feature_views <= 0:
+        return []
+    filtered = []
+    for view in views:
+        base_name = view.image_name.split('.')[0]
+        base_path = os.path.join(language_feature_dir, base_name)
+        if os.path.isfile(base_path + "_s.npy") and os.path.isfile(base_path + "_f.npy"):
+            filtered.append(view)
+            if max_feature_views is not None and len(filtered) >= max_feature_views:
+                break
+    return filtered
             
-def render_set(model_path, name, iteration, source_path, views, gaussians, pipeline, background, feature_level):
+def render_set(model_path, name, iteration, views, gaussians, pipeline, background, feature_level, language_feature_dir, feature_dim=None):
     
     save_path = os.path.join(model_path, name, "ours_{}_langfeat_{}".format(iteration, feature_level))
     render_path = os.path.join(save_path, "renders")
@@ -42,14 +54,18 @@ def render_set(model_path, name, iteration, source_path, views, gaussians, pipel
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         render_pkg = render(view, gaussians, pipeline, background, include_feature=True)
         rendering = render_pkg["render"]
-        gt, mask = view.get_language_feature(language_feature_dir=f"{source_path}/language_features", feature_level=feature_level) #! modified
+        gt, mask = view.get_language_feature(language_feature_dir=language_feature_dir, feature_level=feature_level)
         
         np.save(os.path.join(render_npy_path, view.image_name.split('.')[0] + ".npy"),rendering.permute(1,2,0).cpu().numpy())
         np.save(os.path.join(gts_npy_path, view.image_name.split('.')[0] + ".npy"),gt.permute(1,2,0).cpu().numpy())
         
-        _, H, W = gt.shape
-        gt = gt.reshape(512, -1).T.cpu().numpy()
-        rendering = rendering.reshape(512, -1).T.cpu().numpy() # (H*W, 512)
+        D, H, W = gt.shape
+        if feature_dim is not None and int(feature_dim) != int(D):
+            raise ValueError(
+                f"feature_dim {feature_dim} does not match loaded feature dim {D}."
+            )
+        gt = gt.reshape(D, -1).T.cpu().numpy()
+        rendering = rendering.reshape(D, -1).T.cpu().numpy() # (H*W, D)
         
         pca = PCA(n_components=3)
 
@@ -67,23 +83,45 @@ def render_set(model_path, name, iteration, source_path, views, gaussians, pipel
         torchvision.utils.save_image(rendering, os.path.join(render_path, view.image_name ))
         torchvision.utils.save_image(gt, os.path.join(gts_path, view.image_name))
 
-def render_sets(dataset : ModelParams, opt : OptimizationParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, feature_level : int):
+def render_sets(dataset : ModelParams, opt : OptimizationParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, feature_level : int, feature_dim=None, max_feature_views=None):
 
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, include_feature=True)
 
         checkpoint = os.path.join(args.model_path, f'chkpnt{iteration}_langfeat_{feature_level}.pth')
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore_language_features(model_params, opt)
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+        language_feature_dir = getattr(dataset, "lf_path", os.path.join(dataset.source_path, dataset.language_features_name))
+
         if not skip_train:
-             render_set(args.model_path, "train", scene.loaded_iter, dataset.source_path, scene.getTrainCameras(), gaussians, pipeline, background, feature_level)
+             train_views = scene.getTrainCameras()
+             filtered_train_views = _filter_views_with_language_features(train_views, language_feature_dir, max_feature_views)
+             if len(filtered_train_views) == 0:
+                 raise FileNotFoundError(
+                     f"No language feature files found in {language_feature_dir} for train views."
+                 )
+             if len(filtered_train_views) < len(train_views):
+                 print(
+                     f"Using {len(filtered_train_views)}/{len(train_views)} train cameras with language features."
+                 )
+             render_set(args.model_path, "train", scene.loaded_iter, filtered_train_views, gaussians, pipeline, background, feature_level, language_feature_dir, feature_dim)
 
         if not skip_test:
-             render_set(args.model_path, "test", scene.loaded_iter, dataset.source_path, scene.getTestCameras(), gaussians, pipeline, background, feature_level)
+             test_views = scene.getTestCameras()
+             filtered_test_views = _filter_views_with_language_features(test_views, language_feature_dir, max_feature_views)
+             if len(filtered_test_views) == 0:
+                 raise FileNotFoundError(
+                     f"No language feature files found in {language_feature_dir} for test views."
+                 )
+             if len(filtered_test_views) < len(test_views):
+                 print(
+                     f"Using {len(filtered_test_views)}/{len(test_views)} test cameras with language features."
+                 )
+             render_set(args.model_path, "test", scene.loaded_iter, filtered_test_views, gaussians, pipeline, background, feature_level, language_feature_dir, feature_dim)
 
 
 if __name__ == "__main__":
@@ -96,9 +134,21 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--feature_dim", type=int, default=512)
+    parser.add_argument("--max_feature_views", type=int, default=None)
     args = get_combined_args(parser)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), opt.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.feature_level)
+    render_sets(
+        model.extract(args),
+        opt.extract(args),
+        args.iteration,
+        pipeline.extract(args),
+        args.skip_train,
+        args.skip_test,
+        args.feature_level,
+        args.feature_dim,
+        args.max_feature_views,
+    )

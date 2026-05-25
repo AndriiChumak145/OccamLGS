@@ -45,6 +45,17 @@ class Scene:
             llffhold=8
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.depths, args.eval, args.train_test_exp, llffhold=llffhold)
+        elif os.path.exists(os.path.join(args.source_path, "scene_camera.json")):
+            scene_info = sceneLoadTypeCallbacks["YCBV"](
+                args.source_path,
+                args.images,
+                args.depths,
+                args.eval,
+                args.train_test_exp,
+                llffhold=llffhold,
+                mask_instance_idx=args.mask_instance_idx,
+                mask_source=args.mask_source,
+            )
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.depths, args.eval)

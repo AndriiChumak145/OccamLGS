@@ -19,6 +19,36 @@ WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset):
     image = Image.open(cam_info.image_path)
+    mask_paths = getattr(cam_info, "mask_paths", None)
+    mask_rgb = getattr(args, "mask_rgb", False)
+    if mask_rgb:
+        if not mask_paths:
+            raise FileNotFoundError(
+                f"mask_rgb is enabled but no mask paths were provided for {cam_info.image_name}."
+            )
+        mask_union = None
+        for mask_path in mask_paths:
+            mask_img = Image.open(mask_path).convert("L")
+            mask_arr = np.array(mask_img) > 0
+            if mask_union is None:
+                mask_union = mask_arr
+            else:
+                mask_union |= mask_arr
+
+        if mask_union is None:
+            raise ValueError(f"No valid masks loaded for {cam_info.image_name}.")
+        if mask_union.shape[0] != image.size[1] or mask_union.shape[1] != image.size[0]:
+            raise ValueError(
+                f"Mask size {mask_union.shape[1]}x{mask_union.shape[0]} does not match image size "
+                f"{image.size[0]}x{image.size[1]}."
+            )
+
+        rgb = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
+        bg = np.array([1, 1, 1], dtype=np.float32) if args.white_background else np.array([0, 0, 0], dtype=np.float32)
+        rgb = rgb * mask_union[..., None] + bg * (1.0 - mask_union[..., None])
+        alpha = (mask_union.astype(np.uint8) * 255)[..., None]
+        rgba = np.concatenate([rgb * 255.0, alpha], axis=-1).astype(np.uint8)
+        image = Image.fromarray(rgba, "RGBA")
 
     if cam_info.depth_path != "":
         try:
