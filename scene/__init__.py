@@ -18,6 +18,28 @@ from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
+
+def _subsample_cameras(cameras, max_views, label):
+    if cameras is None:
+        raise ValueError(f"No {label} cameras available for subsampling.")
+    if max_views is None or max_views < 0:
+        return cameras
+    if max_views == 0:
+        raise ValueError(f"max_views must be > 0 for {label} cameras.")
+    total = len(cameras)
+    if max_views > total:
+        raise ValueError(
+            f"max_views ({max_views}) exceeds available {label} cameras ({total})."
+        )
+    if max_views == total:
+        return cameras
+    step = max(1, total // max_views)
+    sampled = cameras[::step][:max_views]
+    print(
+        f"Subsampled {label} cameras: {len(sampled)}/{total} with step {step}."
+    )
+    return sampled
+
 class Scene:
 
     gaussians : GaussianModel
@@ -61,6 +83,14 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.depths, args.eval)
         else:
             assert False, "Could not recognize scene type!"
+
+        max_views = getattr(args, "max_views", -1)
+        train_cameras = _subsample_cameras(
+            scene_info.train_cameras,
+            max_views,
+            "train",
+        )
+        scene_info = scene_info._replace(train_cameras=train_cameras)
 
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:

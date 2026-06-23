@@ -1,0 +1,3 @@
+model_name: "siglip_so400m"
+model_id: "google/siglip2-so400m-patch16-512"
+hidden_dim: 1152

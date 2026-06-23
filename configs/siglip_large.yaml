@@ -1,0 +1,3 @@
+model_name: "siglip2_large_384"
+model_id: "google/siglip2-large-patch16-384"
+hidden_dim: 1024

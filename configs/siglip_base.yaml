@@ -1,0 +1,3 @@
+model_name: "siglip2_base_224"
+model_id: "google/siglip2-base-patch16-224"
+hidden_dim: 768

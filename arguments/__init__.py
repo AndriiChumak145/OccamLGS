@@ -53,6 +53,7 @@ class ModelParams(ParamGroup):
         self._depths = ""
         self._resolution = -1
         self._white_background = False
+        self.max_views = -1
         self.mask_rgb = False
         self.mask_instance_idx = -1
         self.mask_source = "auto"
