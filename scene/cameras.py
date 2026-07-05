@@ -90,9 +90,8 @@ class Camera(nn.Module):
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         
-        y, x = torch.meshgrid(torch.arange(0, self.image_height, device='cuda'), torch.arange(0, self.image_width, device='cuda'))
-        self.x = x.reshape(-1, 1)
-        self.y = y.reshape(-1, 1)
+        self.x = None
+        self.y = None
         
     def get_language_feature(self, language_feature_dir, feature_level):
         language_feature_name = os.path.join(language_feature_dir, self.image_name.split('.')[0])
@@ -112,6 +111,11 @@ class Camera(nn.Module):
 
         # Original format (CLIP Dictionary [N, 512])
         else:
+            if self.x is None or self.y is None:
+                y, x = torch.meshgrid(torch.arange(0, self.image_height, device='cuda'), torch.arange(0, self.image_width, device='cuda'))
+                self.x = x.reshape(-1, 1)
+                self.y = y.reshape(-1, 1)
+                
             seg = seg_map[:, self.y, self.x].squeeze(-1).long()
             mask = seg != -1
             # print(f"Shapes of seg_map: {seg_map.shape}, feature_map: {feature_map.shape} for camera {self.image_name}, seg shape: {seg.shape}, mask shape: {mask.shape}")

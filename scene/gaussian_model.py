@@ -94,7 +94,7 @@ class GaussianModel:
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
-            self.optimizer.state_dict(),
+            self.optimizer.state_dict() if self.optimizer is not None else None,
             self.spatial_lr_scale,
         )
     
@@ -132,7 +132,12 @@ class GaussianModel:
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+        # --- FIX: Safe language feature restoration without optimizer state ---
+        if opt_dict is not None and hasattr(self, 'optimizer') and self.optimizer is not None:
+            self.optimizer.load_state_dict(opt_dict)
+        else:
+            print("Bypassing optimizer state restoration (running in pure inference/render mode).")
+        # ----------------------------------------------------------------------
         
     @property
     def get_scaling(self):
@@ -359,7 +364,21 @@ class GaussianModel:
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
-        optimizable_tensors = self._prune_optimizer(valid_points_mask)
+        
+        # --- FIX: Safe pruning when loaded from .ply (no optimizer) ---
+        if hasattr(self, 'optimizer') and self.optimizer is not None:
+            optimizable_tensors = self._prune_optimizer(valid_points_mask)
+        else:
+            # Fallback: Slice the raw tensors manually since there is no Adam state to maintain
+            optimizable_tensors = {
+                "xyz": self._xyz[valid_points_mask],
+                "f_dc": self._features_dc[valid_points_mask],
+                "f_rest": self._features_rest[valid_points_mask],
+                "opacity": self._opacity[valid_points_mask],
+                "scaling": self._scaling[valid_points_mask],
+                "rotation": self._rotation[valid_points_mask]
+            }
+        # --------------------------------------------------------------
 
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
@@ -368,12 +387,25 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        # Safely check for training trackers before slicing. 
+        # .ply loading initializes them as empty size [0] tensors, so we verify shape matches the mask.
+        mask_len = valid_points_mask.shape[0]
 
-        self.denom = self.denom[valid_points_mask]
-        self.max_radii2D = self.max_radii2D[valid_points_mask]
-        if hasattr(self, "tmp_radii"): 
-            self.tmp_radii = self.tmp_radii[valid_points_mask]
+        if hasattr(self, "xyz_gradient_accum") and self.xyz_gradient_accum is not None and self.xyz_gradient_accum.shape[0] == mask_len:
+            self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask.to(self.xyz_gradient_accum.device)]
+
+        if hasattr(self, "denom") and self.denom is not None and self.denom.shape[0] == mask_len:
+            self.denom = self.denom[valid_points_mask.to(self.denom.device)]
+            
+        if hasattr(self, "max_radii2D") and self.max_radii2D is not None and self.max_radii2D.shape[0] == mask_len:
+            self.max_radii2D = self.max_radii2D[valid_points_mask.to(self.max_radii2D.device)]
+            
+        if hasattr(self, "tmp_radii") and self.tmp_radii is not None and self.tmp_radii.shape[0] == mask_len: 
+            self.tmp_radii = self.tmp_radii[valid_points_mask.to(self.tmp_radii.device)]
+            
+        # Also safely prune the language features we just generated
+        if hasattr(self, 'language_feature') and self.language_feature is not None and self.language_feature.shape[0] == mask_len:
+            self.language_feature = self.language_feature[valid_points_mask.to(self.language_feature.device)]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}

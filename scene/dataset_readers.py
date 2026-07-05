@@ -580,8 +580,105 @@ def readYCBVSceneInfo(
                            is_nerf_synthetic=False)
     return scene_info
 
+def readScanNetSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
+    from pathlib import Path
+    scene_dir = Path(path)
+    rgb_dir = scene_dir / (images if images is not None else "color")
+    pose_dir = scene_dir / "pose"
+    
+    if not rgb_dir.exists() or not pose_dir.exists():
+        raise FileNotFoundError(f"color/ or pose/ directory not found in {scene_dir}")
+        
+    color_files = sorted(list(rgb_dir.glob("*.jpg")), key=lambda x: int(x.stem))
+    if not color_files:
+        raise FileNotFoundError(f"No .jpg images found in {rgb_dir}")
+        
+    sample_img = Image.open(color_files[0])
+    width, height = sample_img.size
+    
+    if width == 1296:
+        fx, fy = 1170.1879, 1170.1879
+        cx, cy = 647.75, 483.75
+    elif width == 640:
+        fx, fy = 577.8706, 577.8706
+        cx, cy = 319.5, 239.5
+    else:
+        scale = width / 640.0
+        fx, fy = 577.8706 * scale, 577.8706 * scale
+        cx, cy = width / 2.0, height / 2.0
+        
+    FovX = focal2fov(fx, width)
+    FovY = focal2fov(fy, height)
+    
+    cam_infos = []
+    valid_cam_centers = []
+    test_frame_ids = []
+    
+    if eval and llffhold:
+        test_frame_ids = [idx for idx in range(len(color_files)) if idx % llffhold == 0]
+        
+    for idx, img_path in enumerate(color_files):
+        frame_idx = img_path.stem
+        pose_path = pose_dir / f"{frame_idx}.txt"
+        if not pose_path.exists():
+            continue
+            
+        c2w = np.loadtxt(pose_path)
+        w2c = np.linalg.inv(c2w)
+        
+        R = w2c[:3, :3].T 
+        T = w2c[:3, 3]
+        
+        valid_cam_centers.append(c2w[:3, 3])
+        
+        cam_infos.append(
+            CameraInfo(
+                uid=idx,
+                R=R,
+                T=T,
+                FovY=FovY,
+                FovX=FovX,
+                depth_params=None,
+                image_path=str(img_path),
+                image_name=img_path.name,
+                depth_path="",
+                width=width,
+                height=height,
+                is_test=idx in test_frame_ids,
+                mask_paths=None,
+            )
+        )
+        
+    train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
+    test_cam_infos = [c for c in cam_infos if c.is_test]
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "scannet_points3d.ply")
+    if not os.path.exists(ply_path):
+        centers = np.array(valid_cam_centers)
+        min_bounds = centers.min(axis=0) - 1.0
+        max_bounds = centers.max(axis=0) + 1.0
+        
+        num_points = 100_000
+        random_pts = np.random.uniform(min_bounds, max_bounds, (num_points, 3)).astype(np.float32)
+        shs = np.random.random((num_points, 3)).astype(np.float32) / 255.0
+        pcd = BasicPointCloud(points=random_pts, colors=SH2RGB(shs), normals=np.zeros((num_points, 3)))
+        storePly(ply_path, random_pts, (SH2RGB(shs) * 255).astype(np.uint8))
+        
+    pcd = fetchPly(ply_path)
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           is_nerf_synthetic=False)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
-    "YCBV": readYCBVSceneInfo
+    "YCBV": readYCBVSceneInfo,
+    "ScanNet": readScanNetSceneInfo
 }
