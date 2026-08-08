@@ -58,7 +58,9 @@ def extract_gaussian_features(model_path, iteration, views, gaussians, pipeline,
         render_pkg = render(view, gaussians, pipeline, background)
 
         if use_online_siglip:
+            view.load_image_data()
             gt_language_feature, gt_mask = online_extractor.extract(view)
+            view.unload_image_data()
         else:
             gt_language_feature, gt_mask = view.get_language_feature(language_feature_dir=language_feature_dir, feature_level=feature_level)
             
@@ -129,6 +131,7 @@ def process_scene_language_features(
                 raise FileNotFoundError(f"No language feature files found in {language_feature_dir}.")
             print(f"Using {len(filtered_views)}/{len(train_views)} cameras with language features from disk.")
 
+        print(f"Memory before extract_gaussian_features: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
         extract_gaussian_features(
             dataset.model_path,
             iteration,
@@ -140,8 +143,9 @@ def process_scene_language_features(
             language_feature_dir,
             config_path=config_path,
             use_online_siglip=use_online_siglip,
-            upsample_method=args.upsample_method
+            upsample_method=upsample_method
         )
+        print(f"Memory after extract_gaussian_features: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
 
 
 if __name__ == "__main__":

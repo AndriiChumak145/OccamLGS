@@ -60,7 +60,7 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
-        
+        self.lazy_load = False
         self._language_features_name = "language_features"
         self._feature_level = 2
         super().__init__(parser, "Loading Parameters", sentinel)

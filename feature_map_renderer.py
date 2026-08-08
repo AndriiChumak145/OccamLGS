@@ -82,7 +82,9 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         rendering_cpu = torch.cat(rendered_chunks, dim=0) 
         
         if use_online_siglip:
+            view.load_image_data()
             gt, mask = online_extractor.extract(view)
+            view.unload_image_data()
         else:
             gt, mask = view.get_language_feature(language_feature_dir=language_feature_dir, feature_level=feature_level)
         

@@ -19,10 +19,11 @@ import os
 from PIL import Image
 
 class Camera(nn.Module):
-    def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params, image, invdepthmap,
+    def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 train_test_exp = False, is_test_dataset = False, is_test_view = False
+                 train_test_exp = False, is_test_dataset = False, is_test_view = False,
+                 cam_info=None, args=None, resolution_scale=1.0, is_nerf_synthetic=False
                  ):
         super(Camera, self).__init__()
 
@@ -41,43 +42,28 @@ class Camera(nn.Module):
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
 
-        resized_image_rgb = PILtoTorch(image, resolution)
-        gt_image = resized_image_rgb[:3, ...]
+        self.image_width = resolution[0]
+        self.image_height = resolution[1]
+        
+        self.cam_info = cam_info
+        self.args = args
+        self.resolution = resolution
+        self.resolution_scale = resolution_scale
+        self.is_nerf_synthetic = is_nerf_synthetic
+        self.train_test_exp = train_test_exp
+        self.is_test_dataset = is_test_dataset
+        self.is_test_view = is_test_view
+        self.depth_params = depth_params
+
+        self.original_image = None
         self.alpha_mask = None
-        if resized_image_rgb.shape[0] == 4:
-            self.alpha_mask = resized_image_rgb[3:4, ...].to(self.data_device)
-        else: 
-            self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].to(self.data_device))
-
-        if train_test_exp and is_test_view:
-            if is_test_dataset:
-                self.alpha_mask[..., :self.alpha_mask.shape[-1] // 2] = 0
-            else:
-                self.alpha_mask[..., self.alpha_mask.shape[-1] // 2:] = 0
-
-        self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
-        self.image_width = self.original_image.shape[2]
-        self.image_height = self.original_image.shape[1]
-
         self.invdepthmap = None
+        self.depth_mask = None
         self.depth_reliable = False
-        if invdepthmap is not None:
-            self.depth_mask = torch.ones_like(self.alpha_mask)
-            self.invdepthmap = cv2.resize(invdepthmap, resolution)
-            self.invdepthmap[self.invdepthmap < 0] = 0
-            self.depth_reliable = True
 
-            if depth_params is not None:
-                if depth_params["scale"] < 0.2 * depth_params["med_scale"] or depth_params["scale"] > 5 * depth_params["med_scale"]:
-                    self.depth_reliable = False
-                    self.depth_mask *= 0
-                
-                if depth_params["scale"] > 0:
-                    self.invdepthmap = self.invdepthmap * depth_params["scale"] + depth_params["offset"]
-
-            if self.invdepthmap.ndim != 2:
-                self.invdepthmap = self.invdepthmap[..., 0]
-            self.invdepthmap = torch.from_numpy(self.invdepthmap[None]).to(self.data_device)
+        self.lazy_load = getattr(args, "lazy_load", False)
+        if not self.lazy_load:
+            self.load_image_data()
 
         self.zfar = 100.0
         self.znear = 0.01
@@ -92,6 +78,85 @@ class Camera(nn.Module):
         
         self.x = None
         self.y = None
+
+    def load_image_data(self):
+        if self.original_image is not None:
+            return
+
+        image = Image.open(self.cam_info.image_path)
+        mask_paths = getattr(self.cam_info, "mask_paths", None)
+        mask_rgb = getattr(self.args, "mask_rgb", False)
+        if mask_rgb:
+            if not mask_paths:
+                raise FileNotFoundError(f"mask_rgb is enabled but no mask paths were provided for {self.cam_info.image_name}.")
+            mask_union = None
+            for mask_path in mask_paths:
+                mask_img = Image.open(mask_path).convert("L")
+                mask_arr = np.array(mask_img) > 0
+                if mask_union is None:
+                    mask_union = mask_arr
+                else:
+                    mask_union |= mask_arr
+            if mask_union is None:
+                raise ValueError(f"No valid masks loaded for {self.cam_info.image_name}.")
+            if mask_union.shape[0] != image.size[1] or mask_union.shape[1] != image.size[0]:
+                raise ValueError(f"Mask size does not match image size.")
+            rgb = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
+            bg = np.array([1, 1, 1], dtype=np.float32) if self.args.white_background else np.array([0, 0, 0], dtype=np.float32)
+            rgb = rgb * mask_union[..., None] + bg * (1.0 - mask_union[..., None])
+            alpha = (mask_union.astype(np.uint8) * 255)[..., None]
+            rgba = np.concatenate([rgb * 255.0, alpha], axis=-1).astype(np.uint8)
+            image = Image.fromarray(rgba, "RGBA")
+
+        invdepthmap = None
+        if self.cam_info.depth_path != "":
+            if self.is_nerf_synthetic:
+                invdepthmap = cv2.imread(self.cam_info.depth_path, -1).astype(np.float32) / 512
+            else:
+                invdepthmap = cv2.imread(self.cam_info.depth_path, -1).astype(np.float32) / float(2**16)
+
+        resized_image_rgb = PILtoTorch(image, self.resolution)
+        gt_image = resized_image_rgb[:3, ...]
+        
+        if resized_image_rgb.shape[0] == 4:
+            self.alpha_mask = resized_image_rgb[3:4, ...].to(self.data_device)
+        else: 
+            self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].to(self.data_device))
+
+        if self.train_test_exp and self.is_test_view:
+            if self.is_test_dataset:
+                self.alpha_mask[..., :self.alpha_mask.shape[-1] // 2] = 0
+            else:
+                self.alpha_mask[..., self.alpha_mask.shape[-1] // 2:] = 0
+
+        self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
+
+        if invdepthmap is not None:
+            self.depth_mask = torch.ones_like(self.alpha_mask)
+            self.invdepthmap = cv2.resize(invdepthmap, self.resolution)
+            self.invdepthmap[self.invdepthmap < 0] = 0
+            self.depth_reliable = True
+
+            if self.depth_params is not None:
+                if self.depth_params["scale"] < 0.2 * self.depth_params["med_scale"] or self.depth_params["scale"] > 5 * self.depth_params["med_scale"]:
+                    self.depth_reliable = False
+                    self.depth_mask *= 0
+                
+                if self.depth_params["scale"] > 0:
+                    self.invdepthmap = self.invdepthmap * self.depth_params["scale"] + self.depth_params["offset"]
+
+            if self.invdepthmap.ndim != 2:
+                self.invdepthmap = self.invdepthmap[..., 0]
+            self.invdepthmap = torch.from_numpy(self.invdepthmap[None]).to(self.data_device)
+
+    def unload_image_data(self):
+        if not getattr(self, "lazy_load", False):
+            return
+        self.original_image = None
+        self.alpha_mask = None
+        self.invdepthmap = None
+        self.depth_mask = None
+
         
     def get_language_feature(self, language_feature_dir, feature_level):
         language_feature_name = os.path.join(language_feature_dir, self.image_name.split('.')[0])
