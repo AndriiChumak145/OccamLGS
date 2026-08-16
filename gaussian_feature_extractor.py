@@ -19,7 +19,33 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, OptimizationParams, get_combined_args
 from gaussian_renderer import GaussianModel
 import yaml
+import numpy as np
 from utils.siglip_extractor import OnlineSiglipExtractor
+
+
+def _select_views_fps(views: list, max_feature_views: int) -> list:
+    """Select up to max_feature_views using Farthest Point Sampling on 3D camera centers."""
+    if max_feature_views is None or max_feature_views <= 0 or len(views) <= max_feature_views:
+        return views
+
+    centers = []
+    for v in views:
+        c = v.camera_center.detach().cpu().numpy()
+        centers.append(c)
+    centers = np.array(centers, dtype=np.float32)
+    assert centers.ndim == 2 and centers.shape[1] == 3, f"Invalid camera centers shape: {centers.shape}"
+
+    selected_indices = [0]
+    distances = np.linalg.norm(centers - centers[0], axis=1)
+
+    for _ in range(1, max_feature_views):
+        far_idx = int(np.argmax(distances))
+        selected_indices.append(far_idx)
+        new_distances = np.linalg.norm(centers - centers[far_idx], axis=1)
+        distances = np.minimum(distances, new_distances)
+
+    selected_indices.sort()
+    return [views[i] for i in selected_indices]
 
 
 def _filter_views_with_language_features(views, language_feature_dir, max_feature_views=None):
@@ -31,8 +57,8 @@ def _filter_views_with_language_features(views, language_feature_dir, max_featur
         base_path = os.path.join(language_feature_dir, base_name)
         if os.path.isfile(base_path + "_s.npy") and os.path.isfile(base_path + "_f.npy"):
             filtered.append(view)
-            if max_feature_views is not None and len(filtered) >= max_feature_views:
-                break
+    if max_feature_views is not None and max_feature_views > 0 and len(filtered) > max_feature_views:
+        filtered = _select_views_fps(filtered, max_feature_views)
     return filtered
 
 
@@ -94,7 +120,8 @@ def extract_gaussian_features(model_path, iteration, views, gaussians, pipeline,
             
 def process_scene_language_features(
         dataset : ModelParams, opt : OptimizationParams, iteration : int, pipeline : PipelineParams, feature_level : int, 
-        config_path=None, max_feature_views=None, use_online_siglip=False, geometry_ply=None, upsample_method="bilinear"):
+        config_path=None, max_feature_views=None, use_online_siglip=False, geometry_ply=None, upsample_method="bilinear",
+        view_sampling_method="fps"):
 
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
@@ -117,19 +144,27 @@ def process_scene_language_features(
         train_views = scene.getTrainCameras()
 
         if use_online_siglip:
-            # Uniform slicing
-            if max_feature_views is not None and max_feature_views > 0:
-                skip_step = max(1, len(train_views) // max_feature_views)
-                filtered_views = train_views[::skip_step]
-            else:
-                filtered_views = train_views
-            print(f"Online SigLIP enabled: Extracted {len(filtered_views)} uniformly distributed views.")
+            all_valid_views = train_views
         else:
-            # Original Disk-Read Sequential Logic
-            filtered_views = _filter_views_with_language_features(train_views, language_feature_dir, max_feature_views)
-            if len(filtered_views) == 0:
+            all_valid_views = _filter_views_with_language_features(train_views, language_feature_dir)
+            if len(all_valid_views) == 0:
                 raise FileNotFoundError(f"No language feature files found in {language_feature_dir}.")
-            print(f"Using {len(filtered_views)}/{len(train_views)} cameras with language features from disk.")
+
+        method = (view_sampling_method or "fps").lower().strip()
+        if max_feature_views is not None and max_feature_views > 0 and len(all_valid_views) > max_feature_views:
+            if method == "fps":
+                filtered_views = _select_views_fps(all_valid_views, max_feature_views)
+            elif method == "uniform":
+                skip_step = max(1, len(all_valid_views) // max_feature_views)
+                filtered_views = all_valid_views[::skip_step][:max_feature_views]
+            elif method == "sequential":
+                filtered_views = all_valid_views[:max_feature_views]
+            else:
+                raise ValueError(f"Unsupported view_sampling_method '{view_sampling_method}'. Choose fps, uniform, or sequential.")
+        else:
+            filtered_views = all_valid_views
+
+        print(f"Selected {len(filtered_views)}/{len(train_views)} feature views using '{method}' sampling method.")
 
         print(f"Memory before extract_gaussian_features: {torch.cuda.memory_allocated() / (1024**3):.2f} GB")
         extract_gaussian_features(
@@ -161,6 +196,7 @@ if __name__ == "__main__":
     parser.add_argument("--online_siglip", action="store_true", help="Generate features in VRAM instead of disk")
     parser.add_argument("--config", type=str, default=None, help="Path to the model profile YAML configuration file")
     parser.add_argument("--upsample_method", type=str, default="bilinear", choices=["bilinear", "naf"], help="Method for upsampling SigLIP patches")
+    parser.add_argument("--view_sampling_method", type=str, default="fps", choices=["fps", "uniform", "sequential"], help="Sampling method for feature views when max_feature_views is set")
     
     # Grab the custom CLI arguments BEFORE the config file wipes them
     safe_args, _ = parser.parse_known_args()
@@ -174,6 +210,7 @@ if __name__ == "__main__":
     args.online_siglip = safe_args.online_siglip
     args.config = safe_args.config
     args.upsample_method = safe_args.upsample_method
+    args.view_sampling_method = safe_args.view_sampling_method
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
@@ -188,5 +225,6 @@ if __name__ == "__main__":
         use_online_siglip=args.online_siglip,
         config_path=args.config,
         geometry_ply=args.geometry_ply,
-        upsample_method=args.upsample_method
+        upsample_method=args.upsample_method,
+        view_sampling_method=args.view_sampling_method
     )
